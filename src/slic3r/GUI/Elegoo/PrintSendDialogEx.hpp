@@ -79,6 +79,7 @@ private:
     std::string imageFileToBase64DataURI(const std::string &img_path) const;
     void buildMmsGroupFromCanvasSlots(const std::vector<ElegooCanvasSlot> &slots, PrinterMmsGroup &group) const;
     void autoMapFilamentsToMms();
+    nlohmann::json buildPrinterListInternal(); // main-thread only
 
     wxWebView* mBrowser{nullptr};
     std::unique_ptr<webviewIpc::WebviewIPCManager> mIpc;
@@ -87,6 +88,7 @@ private:
     // Cached from main thread to avoid worker-thread wxGetApp races (crash ACCESS_VIOLATION at +0x18)
     Slic3r::PresetBundle* m_cached_preset_bundle{nullptr};
     Slic3r::AppConfig*    m_cached_app_config{nullptr};
+    nlohmann::json        m_cachedPrinterList;
 
     bool    mTimeLapse{false};
     bool    mHeatedBedLeveling{false};

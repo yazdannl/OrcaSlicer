@@ -70,6 +70,14 @@ void PrintSendDialogEx::init()
     // Cache for worker-thread IPC handlers (avoids wxGetApp() race / null on background thread)
     m_cached_preset_bundle = preset_bundle;
     m_cached_app_config = wxGetApp().app_config;
+    try {
+        m_cachedPrinterList = buildPrinterListInternal();
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": cached " << m_cachedPrinterList.size() << " printers for CC2 dialog";
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": failed to cache printer list: " << e.what();
+    } catch (...) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": unknown failure caching printer list";
+    }
     SetIcon(wxNullIcon);
     mBrowser = WebView::CreateWebView(this, "");
     if (mBrowser == nullptr) {
@@ -541,45 +549,32 @@ IPCResult PrintSendDialogEx::getPrinterMmsInfo(const std::string &printerId)
     return result;
 }
 
-IPCResult PrintSendDialogEx::getPrinterList()
+nlohmann::json PrintSendDialogEx::buildPrinterListInternal()
 {
-    IPCResult result;
-    nlohmann::json printers = json::array();
-    auto *preset_bundle = m_cached_preset_bundle ? m_cached_preset_bundle : wxGetApp().preset_bundle;
-    auto *app_config = m_cached_app_config ? m_cached_app_config : wxGetApp().app_config;
+    nlohmann::json printers = nlohmann::json::array();
+    auto *preset_bundle = m_cached_preset_bundle;
+    auto *app_config = m_cached_app_config;
     if (!preset_bundle) {
-        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": preset_bundle is null (cached=" << (void*)m_cached_preset_bundle << " wx=" << (void*)wxGetApp().preset_bundle << ")";
-        result.data = printers;
-        result.code = 0;
-        result.message = "success";
-        return result;
-    }
-    if (!app_config) {
-        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": app_config is null";
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": preset_bundle null in buildPrinterListInternal";
+        return printers;
     }
     auto &physical_printers = preset_bundle->physical_printers;
-    // Build list from Orca physical printers filtered to ElegooLink host_type
     for (auto &phys : physical_printers) {
         std::string host_type = phys.config.opt_string("host_type");
         if (host_type != "elegoolink" && host_type != "ElegooLink" && host_type != "htElegooLink") {
-            // Orca stores as enum string; check numeric as well
-            // Fallback: check if host_type contains elegoo
             std::string lower = host_type; std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
             if (lower.find("elegoo") == std::string::npos) continue;
         }
-        // FIX: Orca uses "print_host" — try both keys
         std::string host = phys.config.opt_string("print_host");
         if (host.empty()) host = phys.config.opt_string("printhost_host");
         std::string name = phys.name;
         if (name.empty()) name = host;
         if (host.empty()) continue;
-
         PrinterNetworkInfo info;
-        info.printerId = name; // use preset name as stable id
+        info.printerId = name;
         info.printerName = name;
         info.host = host;
         info.vendor = "Elegoo";
-        // Determine model from associated printer preset
         std::string model = "Elegoo-CC2";
         if (!phys.preset_names.empty()) {
             auto preset = preset_bundle->printers.find_preset(*phys.preset_names.begin());
@@ -590,23 +585,19 @@ IPCResult PrintSendDialogEx::getPrinterList()
         }
         info.printerModel = model;
         info.networkType = NETWORK_TYPE_LAN;
-        info.connectStatus = PRINTER_CONNECT_STATUS_CONNECTED; // assume connected if configured
+        info.connectStatus = PRINTER_CONNECT_STATUS_CONNECTED;
         info.printerStatus = PRINTER_STATUS_IDLE;
         info.isPhysicalPrinter = true;
-        // Capabilities: CC2 has MMS, both have bed leveling and timelapse per Elegoo docs
         info.printCapabilities.supportsAutoBedLeveling = true;
         info.printCapabilities.supportsTimeLapse = true;
         info.printCapabilities.supportsHeatedBedSwitching = true;
-        // Only CC2 supports MMS/CANVAS
         bool isCC2 = (model.find("CC2") != std::string::npos || model == "Elegoo-CC2" || model == "Elegoo Centauri Carbon 2");
         info.systemCapabilities.supportsMultiFilament = isCC2;
         info.printCapabilities.supportsFilamentMapping = isCC2;
         info.printCapabilities.supportsAutoRefill = isCC2;
-
         nlohmann::json j = convertPrinterNetworkInfoToJson(info);
         boost::filesystem::path resources_path(Slic3r::resources_dir());
         std::string img_path = resources_path.string() + "/profiles/Elegoo/" + model + "_cover.png";
-        // Try svg fallback
         if (!boost::filesystem::exists(img_path)) {
             img_path = resources_path.string() + "/profiles/Elegoo/" + model + ".png";
             if (!boost::filesystem::exists(img_path))
@@ -616,15 +607,11 @@ IPCResult PrintSendDialogEx::getPrinterList()
         j["selected"] = false;
         printers.push_back(j);
     }
-    // If no physical printers configured, scan printer presets (machine presets) for ElegooLink printers and add them
-    // This covers users who only have a Machine preset with print_host but no PhysicalPrinter yet
-    // Mirrors how Orca's Device tab resolves CC2: via the edited preset's print_host + host_type/printer_model
     if (printers.empty()) {
         for (auto &preset : preset_bundle->printers) {
             std::string host = preset.config.opt_string("print_host");
             if (host.empty()) host = preset.config.opt_string("printhost_host");
             if (host.empty()) continue;
-            // host_type check: be permissive — Device tab shows any CC2/Neptune even if host_type not yet resolved
             std::string host_type = preset.config.opt_string("host_type");
             std::string lower_ht = host_type; std::transform(lower_ht.begin(), lower_ht.end(), lower_ht.begin(), ::tolower);
             std::string model_tmp;
@@ -634,9 +621,7 @@ IPCResult PrintSendDialogEx::getPrinterList()
                              (lower_model.find("elegoo") != std::string::npos) ||
                              (lower_model.find("centauri") != std::string::npos) ||
                              (lower_model.find("neptune") != std::string::npos);
-            if (!is_elegoo && !host_type.empty()) continue; // if host_type is set and not elegoo, skip; if empty allow (inherited may be empty before bundle reload)
-            // Don't filter by is_visible — the edited/selected preset may be marked invisible in some bundle states but still active
-            // if (!preset.is_visible) continue;
+            if (!is_elegoo && !host_type.empty()) continue;
             std::string name = preset.name;
             std::string model = "Elegoo Centauri Carbon 2";
             if (auto *opt = preset.config.option<ConfigOptionString>("printer_model")) model = opt->value;
@@ -670,9 +655,7 @@ IPCResult PrintSendDialogEx::getPrinterList()
             printers.push_back(j);
         }
     }
-    // Final fallback: try AppConfig recent host for testing
     if (printers.empty() && app_config) {
-        // Try to infer from current AppConfig recent host (check both keys)
         std::string recent_host = app_config->get("recent", "print_host");
         if (recent_host.empty()) recent_host = app_config->get("recent", "printhost_host");
         if (!recent_host.empty()) {
@@ -687,8 +670,6 @@ IPCResult PrintSendDialogEx::getPrinterList()
                 auto *opt = cfg.option<ConfigOptionString>("printer_model");
                 if (opt) model = opt->value;
             } catch (...) {}
-            // use model from fallback
-
             info.printerModel = model;
             info.networkType = NETWORK_TYPE_LAN;
             info.connectStatus = PRINTER_CONNECT_STATUS_CONNECTED;
@@ -707,21 +688,41 @@ IPCResult PrintSendDialogEx::getPrinterList()
             printers.push_back(j);
         }
     }
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": built " << printers.size() << " printers (physical_empty=" << (physical_printers.empty()?1:0) << ")";
+    for (auto &p : printers) BOOST_LOG_TRIVIAL(info) << "  printerId=" << p.value("printerId","?") << " host=" << p.value("host","?") << " model=" << p.value("printerModel","?");
+    return printers;
+}
+
+IPCResult PrintSendDialogEx::getPrinterList()
+{
+    IPCResult result;
+    nlohmann::json printers;
+    if (!m_cachedPrinterList.empty()) {
+        printers = m_cachedPrinterList;
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": returning CACHED " << printers.size() << " printers";
+    } else {
+        try {
+            printers = buildPrinterListInternal();
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": exception in buildPrinterListInternal: " << e.what();
+            printers = nlohmann::json::array();
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": unknown exception in buildPrinterListInternal";
+            printers = nlohmann::json::array();
+        }
+    }
+    auto *app_config = m_cached_app_config ? m_cached_app_config : wxGetApp().app_config;
     std::string selectedPrinterId;
     if (app_config) {
         selectedPrinterId = app_config->get("recent", CONFIG_KEY_SELECTED_PRINTER_ID);
         if (selectedPrinterId.empty()) selectedPrinterId = app_config->get("recent", "elegoolink_selected_printer_id");
     }
-    // Auto-select: prefer selected id, else first
     bool hasSelected = false;
     for (auto &p : printers) {
-        if (p["printerId"].get<std::string>() == selectedPrinterId) { p["selected"] = true; hasSelected = true; }
+        if (p.value("printerId","") == selectedPrinterId) { p["selected"] = true; hasSelected = true; }
         else p["selected"] = false;
     }
     if (!hasSelected && !printers.empty()) printers[0]["selected"] = true;
-
-    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": returning " << printers.size() << " printers (physical_empty=" << (physical_printers.empty()?1:0) << " )";
-    for (auto &p : printers) BOOST_LOG_TRIVIAL(info) << "  printerId=" << p.value("printerId","?") << " host=" << p.value("host","?") << " model=" << p.value("printerModel","?");
     result.data = printers;
     result.code = 0;
     result.message = "success";
