@@ -13,6 +13,7 @@
 #include "slic3r/Utils/PrintHost.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PrinterNetworkInfo.hpp"
+#include "slic3r/Utils/ElegooLink.hpp"
 #include "slic3r/Utils/WebviewIPCManager.h"
 
 #if wxUSE_WEBVIEW_IE
@@ -38,6 +39,7 @@ namespace Slic3r { namespace GUI {
 #define CONFIG_KEY_SELECTED_PRINTER_ID "printsend_selected_printer_id"
 #define CONFIG_KEY_SWITCH_TO_DEVICE_TAB "printsend_switch_to_device_tab"
 #define CONFIG_KEY_MMS_FILAMENT_MAPPING "mms_filament_mapping"
+#define CONFIG_KEY_PATH                "printsend_path"
 #endif
 
 class PrintSendDialogEx : public GUI::DPIDialog

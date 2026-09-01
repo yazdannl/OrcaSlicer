@@ -435,12 +435,11 @@ IPCResult PrintSendDialogEx::getPrinterMmsInfo(const std::string &printerId)
     {
         // Resolve printerId -> host via PhysicalPrinterCollection
         auto *preset_bundle = wxGetApp().preset_bundle;
-        for (size_t i = 0; i < preset_bundle->physical_printers.size(); ++i) {
-            auto &phys = preset_bundle->physical_printers[i];
+        for (auto &phys : preset_bundle->physical_printers) {
             // printerId in our scheme is host (ip) for now; we store physical printer name as id
             // We try to match by stored printerId or host
             std::string cfg_host = phys.config.opt_string("printhost_host");
-            std::string cfg_name = phys.preset_name; // use preset name as id
+            std::string cfg_name = phys.name; // use preset name as id
             if (cfg_name == printerId || cfg_host == printerId) {
                 host = cfg_host;
                 break;
@@ -481,7 +480,7 @@ IPCResult PrintSendDialogEx::getPrinterMmsInfo(const std::string &printerId)
         DynamicPrintConfig cfg;
         cfg.set_key_value("printhost_host", new ConfigOptionString(host));
         cfg.set_key_value("printhost_port", new ConfigOptionString("3030"));
-        ElegooLink tmpLink(std::move(cfg));
+        ElegooLink tmpLink(&cfg);
         // We need to know if host is reachable; try fetch
         // Need printer model for classify
         tmpLink.set_printer_model("Elegoo Centauri Carbon 2");
@@ -525,8 +524,7 @@ IPCResult PrintSendDialogEx::getPrinterList()
     auto *preset_bundle = wxGetApp().preset_bundle;
     auto &physical_printers = preset_bundle->physical_printers;
     // Build list from Orca physical printers filtered to ElegooLink host_type
-    for (size_t i = 0; i < physical_printers.size(); ++i) {
-        auto &phys = physical_printers[i];
+    for (auto &phys : physical_printers) {
         std::string host_type = phys.config.opt_string("host_type");
         if (host_type != "elegoolink" && host_type != "ElegooLink" && host_type != "htElegooLink") {
             // Orca stores as enum string; check numeric as well
@@ -535,7 +533,7 @@ IPCResult PrintSendDialogEx::getPrinterList()
             if (lower.find("elegoo") == std::string::npos) continue;
         }
         std::string host = phys.config.opt_string("printhost_host");
-        std::string name = phys.preset_name;
+        std::string name = phys.name;
         if (name.empty()) name = host;
         if (host.empty()) continue;
 
@@ -546,8 +544,8 @@ IPCResult PrintSendDialogEx::getPrinterList()
         info.vendor = "Elegoo";
         // Determine model from associated printer preset
         std::string model = "Elegoo-CC2";
-        if (phys.preset_names.size() > 0) {
-            auto preset = preset_bundle->find_preset(phys.preset_names[0]);
+        if (!phys.preset_names.empty()) {
+            auto preset = preset_bundle->printers.find_preset(*phys.preset_names.begin());
             if (preset) {
                 auto *opt = preset->config.option<ConfigOptionString>("printer_model");
                 if (opt) model = opt->value;

@@ -109,7 +109,9 @@ private:
 #endif
 
     std::string m_printerModel;
-
+public:
+    void set_printer_model(const std::string& m) { m_printerModel = m; }
+private:
     // CC2 CANVAS support
     static constexpr int ELEGOO_GET_CANVAS = 324;
 };
