@@ -16,6 +16,8 @@
 #include "slic3r/Utils/ElegooLink.hpp"
 #include "slic3r/Utils/WebviewIPCManager.h"
 
+namespace Slic3r { class PresetBundle; class AppConfig; }
+
 #if wxUSE_WEBVIEW_IE
 #include "wx/msw/webview_ie.h"
 #endif
@@ -82,6 +84,9 @@ private:
     std::unique_ptr<webviewIpc::WebviewIPCManager> mIpc;
     Plater*  mPlater{nullptr};
     int mPrintPlateIdx;
+    // Cached from main thread to avoid worker-thread wxGetApp races (crash ACCESS_VIOLATION at +0x18)
+    Slic3r::PresetBundle* m_cached_preset_bundle{nullptr};
+    Slic3r::AppConfig*    m_cached_app_config{nullptr};
 
     bool    mTimeLapse{false};
     bool    mHeatedBedLeveling{false};

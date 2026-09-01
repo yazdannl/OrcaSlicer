@@ -67,6 +67,9 @@ void PrintSendDialogEx::init()
 {
     const AppConfig* app_config = wxGetApp().app_config;
     auto preset_bundle = wxGetApp().preset_bundle;
+    // Cache for worker-thread IPC handlers (avoids wxGetApp() race / null on background thread)
+    m_cached_preset_bundle = preset_bundle;
+    m_cached_app_config = wxGetApp().app_config;
     SetIcon(wxNullIcon);
     mBrowser = WebView::CreateWebView(this, "");
     if (mBrowser == nullptr) {
@@ -304,7 +307,8 @@ void PrintSendDialogEx::autoMapFilamentsToMms()
 
 IPCResult PrintSendDialogEx::preparePrintTask(const std::string& printerId)
 {
-    auto preset_bundle = wxGetApp().preset_bundle;
+    auto *preset_bundle = m_cached_preset_bundle ? m_cached_preset_bundle : wxGetApp().preset_bundle;
+    if (!preset_bundle) return IPCResult::error("preset_bundle null");
     const Print& print = mPlater->get_partplate_list().get_current_fff_print();
     const auto& stats = print.print_statistics();
     nlohmann::json printInfo = json::object();
@@ -429,12 +433,22 @@ IPCResult PrintSendDialogEx::getPrinterMmsInfo(const std::string &printerId)
 {
     IPCResult result;
     mMmsGroup = PrinterMmsGroup();
+    auto *preset_bundle = m_cached_preset_bundle ? m_cached_preset_bundle : wxGetApp().preset_bundle;
+    if (!preset_bundle) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": preset_bundle is null";
+        result.data = json::object();
+        result.data["mmsInfo"] = json::object();
+        result.data["mmsInfo"]["mmsList"] = json::array();
+        result.data["mmsInfo"]["connected"] = false;
+        result.data["mappedFilamentList"] = json::array();
+        result.code = 0;
+        result.message = getErrorMessage(PrinterNetworkErrorCode::SUCCESS);
+        return result;
+    }
     // Find printer host for this printerId
     std::string host, token;
     bool isCC2 = false;
     {
-        // Resolve printerId -> host via PhysicalPrinterCollection (+ fallback to printer presets)
-        auto *preset_bundle = wxGetApp().preset_bundle;
         for (auto &phys : preset_bundle->physical_printers) {
             // printerId in our scheme is host (ip) for now; we store physical printer name as id
             // We try to match by stored printerId or host
@@ -531,7 +545,18 @@ IPCResult PrintSendDialogEx::getPrinterList()
 {
     IPCResult result;
     nlohmann::json printers = json::array();
-    auto *preset_bundle = wxGetApp().preset_bundle;
+    auto *preset_bundle = m_cached_preset_bundle ? m_cached_preset_bundle : wxGetApp().preset_bundle;
+    auto *app_config = m_cached_app_config ? m_cached_app_config : wxGetApp().app_config;
+    if (!preset_bundle) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": preset_bundle is null (cached=" << (void*)m_cached_preset_bundle << " wx=" << (void*)wxGetApp().preset_bundle << ")";
+        result.data = printers;
+        result.code = 0;
+        result.message = "success";
+        return result;
+    }
+    if (!app_config) {
+        BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": app_config is null";
+    }
     auto &physical_printers = preset_bundle->physical_printers;
     // Build list from Orca physical printers filtered to ElegooLink host_type
     for (auto &phys : physical_printers) {
@@ -646,19 +671,24 @@ IPCResult PrintSendDialogEx::getPrinterList()
         }
     }
     // Final fallback: try AppConfig recent host for testing
-    if (printers.empty()) {
+    if (printers.empty() && app_config) {
         // Try to infer from current AppConfig recent host (check both keys)
-        std::string recent_host = wxGetApp().app_config->get("recent", "print_host");
-        if (recent_host.empty()) recent_host = wxGetApp().app_config->get("recent", "printhost_host");
+        std::string recent_host = app_config->get("recent", "print_host");
+        if (recent_host.empty()) recent_host = app_config->get("recent", "printhost_host");
         if (!recent_host.empty()) {
             PrinterNetworkInfo info;
             info.printerId = recent_host;
             info.printerName = recent_host;
             info.host = recent_host;
             info.vendor = "Elegoo";
-            auto cfg = preset_bundle->printers.get_edited_preset().config;
-            auto *opt = cfg.option<ConfigOptionString>("printer_model");
-            std::string model = opt ? opt->value : "Elegoo-CC2";
+            std::string model = "Elegoo-CC2";
+            try {
+                auto cfg = preset_bundle->printers.get_edited_preset().config;
+                auto *opt = cfg.option<ConfigOptionString>("printer_model");
+                if (opt) model = opt->value;
+            } catch (...) {}
+            // use model from fallback
+
             info.printerModel = model;
             info.networkType = NETWORK_TYPE_LAN;
             info.connectStatus = PRINTER_CONNECT_STATUS_CONNECTED;
@@ -677,8 +707,11 @@ IPCResult PrintSendDialogEx::getPrinterList()
             printers.push_back(j);
         }
     }
-    std::string selectedPrinterId = wxGetApp().app_config->get("recent", CONFIG_KEY_SELECTED_PRINTER_ID);
-    if (selectedPrinterId.empty()) selectedPrinterId = wxGetApp().app_config->get("recent", "elegoolink_selected_printer_id");
+    std::string selectedPrinterId;
+    if (app_config) {
+        selectedPrinterId = app_config->get("recent", CONFIG_KEY_SELECTED_PRINTER_ID);
+        if (selectedPrinterId.empty()) selectedPrinterId = app_config->get("recent", "elegoolink_selected_printer_id");
+    }
     // Auto-select: prefer selected id, else first
     bool hasSelected = false;
     for (auto &p : printers) {
@@ -687,6 +720,8 @@ IPCResult PrintSendDialogEx::getPrinterList()
     }
     if (!hasSelected && !printers.empty()) printers[0]["selected"] = true;
 
+    BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": returning " << printers.size() << " printers (physical_empty=" << (physical_printers.empty()?1:0) << " )";
+    for (auto &p : printers) BOOST_LOG_TRIVIAL(info) << "  printerId=" << p.value("printerId","?") << " host=" << p.value("host","?") << " model=" << p.value("printerModel","?");
     result.data = printers;
     result.code = 0;
     result.message = "success";
