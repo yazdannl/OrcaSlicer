@@ -593,15 +593,25 @@ IPCResult PrintSendDialogEx::getPrinterList()
     }
     // If no physical printers configured, scan printer presets (machine presets) for ElegooLink printers and add them
     // This covers users who only have a Machine preset with print_host but no PhysicalPrinter yet
+    // Mirrors how Orca's Device tab resolves CC2: via the edited preset's print_host + host_type/printer_model
     if (printers.empty()) {
         for (auto &preset : preset_bundle->printers) {
-            std::string host_type = preset.config.opt_string("host_type");
-            std::string lower = host_type; std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-            if (lower.find("elegoo") == std::string::npos) continue;
             std::string host = preset.config.opt_string("print_host");
             if (host.empty()) host = preset.config.opt_string("printhost_host");
             if (host.empty()) continue;
-            if (!preset.is_visible) continue;
+            // host_type check: be permissive — Device tab shows any CC2/Neptune even if host_type not yet resolved
+            std::string host_type = preset.config.opt_string("host_type");
+            std::string lower_ht = host_type; std::transform(lower_ht.begin(), lower_ht.end(), lower_ht.begin(), ::tolower);
+            std::string model_tmp;
+            if (auto *opt = preset.config.option<ConfigOptionString>("printer_model")) model_tmp = opt->value;
+            std::string lower_model = model_tmp; std::transform(lower_model.begin(), lower_model.end(), lower_model.begin(), ::tolower);
+            bool is_elegoo = (lower_ht.find("elegoo") != std::string::npos) ||
+                             (lower_model.find("elegoo") != std::string::npos) ||
+                             (lower_model.find("centauri") != std::string::npos) ||
+                             (lower_model.find("neptune") != std::string::npos);
+            if (!is_elegoo && !host_type.empty()) continue; // if host_type is set and not elegoo, skip; if empty allow (inherited may be empty before bundle reload)
+            // Don't filter by is_visible — the edited/selected preset may be marked invisible in some bundle states but still active
+            // if (!preset.is_visible) continue;
             std::string name = preset.name;
             std::string model = "Elegoo Centauri Carbon 2";
             if (auto *opt = preset.config.option<ConfigOptionString>("printer_model")) model = opt->value;
