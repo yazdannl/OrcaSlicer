@@ -433,16 +433,26 @@ IPCResult PrintSendDialogEx::getPrinterMmsInfo(const std::string &printerId)
     std::string host, token;
     bool isCC2 = false;
     {
-        // Resolve printerId -> host via PhysicalPrinterCollection
+        // Resolve printerId -> host via PhysicalPrinterCollection (+ fallback to printer presets)
         auto *preset_bundle = wxGetApp().preset_bundle;
         for (auto &phys : preset_bundle->physical_printers) {
             // printerId in our scheme is host (ip) for now; we store physical printer name as id
             // We try to match by stored printerId or host
-            std::string cfg_host = phys.config.opt_string("printhost_host");
+            // FIX: Orca uses "print_host" not "printhost_host" — try both
+            std::string cfg_host = phys.config.opt_string("print_host");
+            if (cfg_host.empty()) cfg_host = phys.config.opt_string("printhost_host");
             std::string cfg_name = phys.name; // use preset name as id
             if (cfg_name == printerId || cfg_host == printerId) {
                 host = cfg_host;
                 break;
+            }
+        }
+        // Fallback: also check printer presets (machine presets) directly — PhysicalPrinterCollection may be empty
+        if (host.empty()) {
+            for (auto &preset : preset_bundle->printers) {
+                std::string ph = preset.config.opt_string("print_host");
+                if (ph.empty()) ph = preset.config.opt_string("printhost_host");
+                if (preset.name == printerId || ph == printerId) { host = ph; break; }
             }
         }
         // Fallback: if printerId looks like IP/host, use it directly
@@ -532,7 +542,9 @@ IPCResult PrintSendDialogEx::getPrinterList()
             std::string lower = host_type; std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
             if (lower.find("elegoo") == std::string::npos) continue;
         }
-        std::string host = phys.config.opt_string("printhost_host");
+        // FIX: Orca uses "print_host" — try both keys
+        std::string host = phys.config.opt_string("print_host");
+        if (host.empty()) host = phys.config.opt_string("printhost_host");
         std::string name = phys.name;
         if (name.empty()) name = host;
         if (host.empty()) continue;
@@ -579,10 +591,55 @@ IPCResult PrintSendDialogEx::getPrinterList()
         j["selected"] = false;
         printers.push_back(j);
     }
-    // If no physical printers configured, add a placeholder from current config host for testing
+    // If no physical printers configured, scan printer presets (machine presets) for ElegooLink printers and add them
+    // This covers users who only have a Machine preset with print_host but no PhysicalPrinter yet
     if (printers.empty()) {
-        // Try to infer from current AppConfig recent host
-        std::string recent_host = wxGetApp().app_config->get("recent", "printhost_host");
+        for (auto &preset : preset_bundle->printers) {
+            std::string host_type = preset.config.opt_string("host_type");
+            std::string lower = host_type; std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            if (lower.find("elegoo") == std::string::npos) continue;
+            std::string host = preset.config.opt_string("print_host");
+            if (host.empty()) host = preset.config.opt_string("printhost_host");
+            if (host.empty()) continue;
+            if (!preset.is_visible) continue;
+            std::string name = preset.name;
+            std::string model = "Elegoo Centauri Carbon 2";
+            if (auto *opt = preset.config.option<ConfigOptionString>("printer_model")) model = opt->value;
+            else if (auto *opt2 = preset.config.option<ConfigOptionString>("printer_settings_id")) model = opt2->value;
+            PrinterNetworkInfo info;
+            info.printerId = name;
+            info.printerName = name;
+            info.host = host;
+            info.vendor = "Elegoo";
+            info.printerModel = model;
+            info.networkType = NETWORK_TYPE_LAN;
+            info.connectStatus = PRINTER_CONNECT_STATUS_CONNECTED;
+            info.printerStatus = PRINTER_STATUS_IDLE;
+            info.isPhysicalPrinter = false;
+            info.printCapabilities.supportsAutoBedLeveling = true;
+            info.printCapabilities.supportsTimeLapse = true;
+            info.printCapabilities.supportsHeatedBedSwitching = true;
+            bool isCC2 = (model.find("CC2") != std::string::npos || model.find("Carbon 2") != std::string::npos || model == "Elegoo Centauri Carbon 2");
+            info.systemCapabilities.supportsMultiFilament = isCC2;
+            info.printCapabilities.supportsFilamentMapping = isCC2;
+            info.printCapabilities.supportsAutoRefill = isCC2;
+            nlohmann::json j = convertPrinterNetworkInfoToJson(info);
+            boost::filesystem::path resources_path(Slic3r::resources_dir());
+            std::string img_path = resources_path.string() + "/profiles/Elegoo/" + model + "_cover.png";
+            if (!boost::filesystem::exists(img_path)) {
+                img_path = resources_path.string() + "/profiles/Elegoo/" + model + ".png";
+                if (!boost::filesystem::exists(img_path)) img_path = resources_path.string() + "/profiles/Elegoo/cover.png";
+            }
+            j["printerImg"] = imageFileToBase64DataURI(img_path);
+            j["selected"] = false;
+            printers.push_back(j);
+        }
+    }
+    // Final fallback: try AppConfig recent host for testing
+    if (printers.empty()) {
+        // Try to infer from current AppConfig recent host (check both keys)
+        std::string recent_host = wxGetApp().app_config->get("recent", "print_host");
+        if (recent_host.empty()) recent_host = wxGetApp().app_config->get("recent", "printhost_host");
         if (!recent_host.empty()) {
             PrinterNetworkInfo info;
             info.printerId = recent_host;
