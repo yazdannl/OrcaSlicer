@@ -608,9 +608,14 @@ nlohmann::json PrintSendDialogEx::buildPrinterListInternal()
         printers.push_back(j);
     }
     if (printers.empty()) {
+        // Lock PresetCollection to avoid concurrent modification (crash at 613)
+        preset_bundle->printers.lock();
+        try {
         for (auto &preset : preset_bundle->printers) {
-            std::string host = preset.config.opt_string("print_host");
-            if (host.empty()) host = preset.config.opt_string("printhost_host");
+            try {
+            std::string host;
+            try { host = preset.config.opt_string("print_host"); } catch (...) { continue; }
+            if (host.empty()) try { host = preset.config.opt_string("printhost_host"); } catch (...) { continue; }
             if (host.empty()) continue;
             std::string host_type = preset.config.opt_string("host_type");
             std::string lower_ht = host_type; std::transform(lower_ht.begin(), lower_ht.end(), lower_ht.begin(), ::tolower);
@@ -653,7 +658,10 @@ nlohmann::json PrintSendDialogEx::buildPrinterListInternal()
             j["printerImg"] = imageFileToBase64DataURI(img_path);
             j["selected"] = false;
             printers.push_back(j);
+            } catch (const std::exception &e) { BOOST_LOG_TRIVIAL(error) << "preset loop inner: " << e.what(); continue; } catch (...) { BOOST_LOG_TRIVIAL(error) << "preset loop inner unknown"; continue; }
         }
+        } catch (const std::exception &e) { BOOST_LOG_TRIVIAL(error) << "preset loop outer: " << e.what(); } catch (...) { BOOST_LOG_TRIVIAL(error) << "preset loop outer unknown"; }
+        preset_bundle->printers.unlock();
     }
     if (printers.empty() && app_config) {
         std::string recent_host = app_config->get("recent", "print_host");
